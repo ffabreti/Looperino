@@ -26,9 +26,35 @@
     byte incoming_data;
 
     // DATA FOR CALCULATIONS
-    unsigned int QPM = 4;  // QUARTERS PER MEASURE
+    /*
+    Time signature  (REF: https://www.eegsynth.org/?p=1798)
+    In music theory, beats are organized in blocks of beats called measures or bars,
+    which then repeat themselves throughout (parts of) a song. Within a measure, the 
+    way in which beats relate to events (notes) is called its time-signature. The most
+    common time-signature is 4/4, therefor also called ‘common time’. In common time,
+    one bar consists of four beats, and each beat corresponds to the duration of a 
+    quarter-note (one forth of a note). The elementary sequence of beats is a measure,
+    consisting of a number of beats (commonly 4), which correspond to a particular 
+    note-duration (typically a quarter note).
+    
+    Pulses Per Quarter Note (REF: https://www.eegsynth.org/?p=1798)
+    The time-signature says nothing about how slow or fast the notes are played. As I 
+    said earlier, that is determined by its tempo, described in BPM. For a MIDI instruments
+    to communicate the tempo, they need more than just one signal for every beat (or 
+    quarter-note) to code for slight variations in tempo. In MIDI, tempo is therefor 
+    defined in a number of Pulses Per Quarter Note (PPQN). In most step-sequencers, 
+    we are dealing with a 4/4 time signature with the common default set at 24PPQN, 
+    meaning that there are 24 pulses (or ‘ticks’) in a beat (or quarter-note). A single
+    bar/measure will therefor have a total of 4×24=96 pulses. Most MIDI devices can be
+    set at another PPQN rate, but 24 PPQN will suffice for most intends and purposes.
+    
+    OBS1: A "quarter note" is just used as a unit of time, and not necessarily related to actual notes or bars in the song.
+    OBS2: musicians think in terms of beat per time. MIDI "thinks" in terms of time per beat.
+    OBS3: 
+    */
+    unsigned int QPM = 4;  // QUARTERS PER MEASURE (COMMON TIME)
     unsigned int NOM = 1;  // MINIMUM NUMBERS OF MEASURE OF THE LOOP
-    unsigned int PPQ = 24; // TICK OR PULSES PER QUARTER
+    unsigned int PPQ = 24; // TICK OR PULSES OF MIDI CLOCK PER QUARTER NOTE, THIS IS DEFINED BY MIDI SPECS
     unsigned int BPM = 0;  // BEATS PER MINUTE
 
     // TIMINGS AND COUNTERS
@@ -50,15 +76,16 @@
 
     void loop() {
      
-      // READ THE INCOMING MIDI
+      // READ THE INCOMING MIDI FROM EXTERNAL MASTER DEVICE
        CheckSerial();
      
-      // KEEP LINK ACTIVE
+      // KEEP LINK ACTIVE WITH JAMMAN EVERY 400ms
        if (micros() - jamsync_link_timer > 400000) {sendLink();}
      
-      // SEND SYNC COMMAND
+      // SEND SYNC COMMAND EVERY MEASURE
+      // MIDI SENDS 24 TICKS PER QUARTER NOTE, MEANING THAT WE HAVE 96 TICKS PER MEASURE
        if (Tick_Counter == NOM*QPM*PPQ) {
-        GetBPM();
+         GetBPM();
          Sendjamsync_sync();
         Tick_Counter = 0;
        }
@@ -96,29 +123,36 @@
       void sendStop() {
         for (int i = 1; i < 25; i++) { Serial.write(jamsync_stop[i]); }
       }
-       
-       void GetBPM() {
+
+      // WE NEED TO CALC HOW MANY SECONDS HAVE PASSED AFTER RECEIVING A COMPLETE MEASURE
+      // A COMPLETE MEASURE IS MADE OF 96 TICKS DIVIDED IN 4 QUARTERS
+      // 
+      // ref: https://majicdesigns.github.io/MD_MIDIFile/page_timing.html
+      // OBS: tempo = us / quarternote = us / QPM
+      // OBS: BPM = 60.000.000 / tempo = 60.000.00 / DELTA / QPM = 60.000.000 * QPM / DELTA
+      void GetBPM() {
           jamsync_measure_timer = micros() - jamsync_measure_timer;
-        jamsync_loop_timer = jamsync_measure_timer;
+          jamsync_loop_timer = jamsync_measure_timer;
           BPM = round(QPM * 60000000.0 / jamsync_measure_timer);
           jamsync_measure_timer = micros();
        }
        
+       // THE ONLY CONTAINER WE NEED TO SEND TO JAMSYNC INPUT IS A SYNC CONTAINER
+       // WHICH CONTAINS ALL INFO FOR CLOCK, START AND STOP
        void Sendjamsync_sync(){
-         unsigned long LoopTime;
-        int b163 = 0;
-        int w;
+          unsigned long LoopTime;
+          int b163 = 0;
+          int w;
           int x;
           int y;
           int z=0; //xor checksum
-
        
-        // LoopTime = floor(1000* NOM * QPM * 60.0 / BPM);
-        LoopTime = floor(jamsync_loop_timer / 1000.0);
-        x = floor(log(LoopTime/2000.0)/log(4.0));
-        b163 = (LoopTime/(2000.0 * pow(4.0,x)))>2;
-        y = 2 * pow(2,b163) * pow(4,x);
-        w = floor(LoopTime / y);
+          // LoopTime = floor(1000* NOM * QPM * 60.0 / BPM);
+          LoopTime = floor(jamsync_loop_timer / 1000.0);
+          x = floor(log(LoopTime/2000.0)/log(4.0));
+          b163 = (LoopTime/(2000.0 * pow(4.0,x)))>2;
+          y = 2 * pow(2,b163) * pow(4,x);
+          w = floor(LoopTime / y);
 
           // BPM
           jamsync_sync[8]  = 66 + 8 * ((63<BPM) && (BPM<128) || BPM>191) ;
@@ -126,25 +160,24 @@
                              (2*BPM>127 && 2*BPM<256)*(2*BPM -128) +
                              (BPM>127 && BPM<256)*(BPM-128);
           jamsync_sync[13] = 1*(BPM>127)+66;
-          
+
           // lenght
           jamsync_sync[16] = 64 + 8*b163;
           jamsync_sync[21] = 64 + x;
           jamsync_sync[20] = 128 *(0.001*w-1);
           jamsync_sync[19] = pow(128.0,2) *(0.001*w-1 - jamsync_sync[20]/128.0);
           jamsync_sync[18] = pow(128.0,3) *(0.001*w-1 - jamsync_sync[20]/128.0 - jamsync_sync[19]/pow(128.0,2));
-          
-          // command
+
+          // command SYNC
           jamsync_sync[22] = 5;
-          
+
           // checksum
           for (int i = 8; i < 23; i++) {
              z = z ^ int(jamsync_sync[i]); // checksum XOR
           }
           jamsync_sync[23] = z;
-          
+
           for (int i = 1; i < 25; i++) {
-             Serial.write(int(jamsync_sync[i]));
+              Serial.write(int(jamsync_sync[i]));
           }
        }
-       
